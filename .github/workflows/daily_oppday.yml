@@ -1,0 +1,30 @@
+name: Daily SET OppDay Telegram Bot
+
+on:
+  schedule:
+    # เวลา 01:00 UTC เท่ากับ 08:00 น. เวลาประเทศไทย
+    - cron: '0 1 * * *'
+  workflow_dispatch: # กดรันทดสอบด้วยตัวเองได้
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install playwright beautifulsoup4 requests
+          playwright install chromium
+
+      - name: Run OppDay Notifier
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python bot.py
