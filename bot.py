@@ -18,137 +18,114 @@ THAI_MONTHS_FULL = {
     9: "กันยายน", 10: "ตุลาคม", 11: "พฤศจิกายน", 12: "ธันวาคม"
 }
 
-THAI_MONTHS_SHORT = {
-    1: "ม.ค.", 2: "ก.พ.", 3: "มี.ค.", 4: "เม.ย.",
-    5: "พ.ค.", 6: "มิ.ย.", 7: "ก.ค.", 8: "ส.ค.",
-    9: "ก.ย.", 10: "ต.ค.", 11: "พ.ย.", 12: "ธ.ค."
-}
-
-def extract_right_panel_events(page):
-    """ดึงหัวข้อวันที่และรายชื่อหุ้นจากกล่องฝั่งขวามือของ 'ปฏิทินกิจกรรม'"""
+def extract_right_panel_symbols(page):
+    """ดึงเฉพาะ 'ชื่อย่อหุ้น' ที่อยู่ในกล่อง 'รายการกิจกรรม ...' ฝั่งขวามือ และเป็นคิวนำเสนองบการเงินเท่านั้น"""
     try:
         return page.evaluate("""() => {
-            const allElements = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, div, span, p'));
-            let headerText = "";
+            // 1. ค้นหาหัวข้อ 'รายการกิจกรรม <วันที่>' ด้านขวา
+            const allEls = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, div, span, p'));
             let headerEl = null;
+            let headerText = "";
 
-            for (const el of allElements) {
+            for (const el of allEls) {
                 const txt = (el.innerText || "").trim();
                 if (txt.startsWith("รายการกิจกรรม") && txt.length < 80 && el.children.length === 0) {
-                    headerText = txt;
                     headerEl = el;
+                    headerText = txt;
                     break;
                 }
             }
 
-            let container = headerEl ? headerEl.parentElement : document.body;
-            while (container && container !== document.body) {
-                const cText = container.innerText || "";
-                if (cText.includes("รับชมออนไลน์") || cText.includes("รายละเอียด") || cText.includes("ไม่มีกิจกรรม")) {
+            if (!headerEl) {
+                return { header: "", symbols: [] };
+            }
+
+            // 2. หาเฉพาะกรอบ Container ของฝั่งขวาที่อยู่คู่กับหัวข้อ 'รายการกิจกรรม' เท่านั้น
+            // (ไม่ถอยออกไปถึง document.body เพื่อป้องกันไม่ให้ไปกวาดโดน Weekly Highlights ด้านบน)
+            let panel = headerEl.parentElement;
+            while (panel && panel !== document.body) {
+                const pText = panel.innerText || "";
+                // ถ้าถอยไปจนเจอคำว่า 'ปฏิทินกิจกรรม' หรือ 'Weekly Highlights' แปลว่ากว้างเกินไปแล้ว ให้หยุดก่อนหน้านั้น
+                if (pText.includes("Weekly Highlights") || pText.includes("ปฏิทินกิจกรรม")) {
                     break;
                 }
-                container = container.parentElement;
+                panel = panel.parentElement;
             }
-            if (!container) container = document.body;
+            // หากหยุดเพราะกว้างเกิน ให้ใช้ชั้นลูกที่ครอบเฉพาะฝั่งขวา
+            let rightContainer = headerEl.parentElement;
+            let curr = headerEl.parentElement;
+            while (curr && curr !== panel && curr !== document.body) {
+                rightContainer = curr;
+                curr = curr.parentElement;
+            }
 
-            const timeRegex = /(\\d{2}:\\d{2}\\s*[-–]\\s*\\d{2}:\\d{2})/;
-            const companyRegex = /^([A-Z0-9&*+-]+)\\s*:\\s*(.+)$/;
+            // 3. เลื่อน Scrollbar ในกล่องฝั่งขวาลงทีละสเต็ปเพื่อให้เว็บเรนเดอร์หุ้นครบทุกตัว
+            const scrollables = [rightContainer, ...Array.from(rightContainer.querySelectorAll('div'))].filter(
+                el => el && el.scrollHeight > el.clientHeight + 10
+            );
 
-            const cards = Array.from(container.querySelectorAll('div, li, article'));
-            const items = [];
-            const seenSymbols = new Set();
+            // กวาดรายชื่อหุ้นในกล่องฝั่งขวา
+            const collectSymbols = () => {
+                const found = [];
+                // รูปแบบบรรทัดแรกของการ์ดหุ้น: ชื่อย่อหุ้นต้องขึ้นต้นด้วยตัวอักษรภาษาอังกฤษพิมพ์ใหญ่ (ป้องกันไม่ให้จับตัวเลขเวลา 09:15)
+                const symbolLineRegex = /^([A-Z][A-Z0-9&*+-]{0,14})\\s*:\\s*(.+)$/;
+                const cards = Array.from(rightContainer.querySelectorAll('div, li, article'));
 
-            for (const card of cards) {
-                const text = (card.innerText || "").trim();
-                if (!timeRegex.test(text)) continue;
+                for (const card of cards) {
+                    const text = (card.innerText || "").trim();
+                    // กรองเฉพาะคิวกิจกรรมที่มีคำว่า 'การนำเสนอข้อมูลงบการเงิน' หรือ 'ผลการดำเนินงาน' (OppDay)
+                    if (!text.includes("การนำเสนอข้อมูลงบการเงิน") && !text.includes("ผลการดำเนินงาน")) {
+                        continue;
+                    }
 
-                const timeMatches = text.match(new RegExp(timeRegex, 'g')) || [];
-                if (timeMatches.length !== 1) continue;
+                    // เช็กว่าเป็นกล่องของการ์ดใบเดียว (มีคำว่า 'รายละเอียด' แค่ 1 ครั้ง)
+                    const detailCount = (text.match(/รายละเอียด/g) || []).length;
+                    if (detailCount !== 1) continue;
 
-                const lines = text.split('\\n').map(l => l.trim()).filter(l => l && l !== '⋮' && l !== '...');
-                let titleLine = "";
-                let sectorLine = "";
-                let timeStr = timeMatches[0];
-
-                for (let i = 0; i < lines.length; i++) {
-                    if (companyRegex.test(lines[i])) {
-                        titleLine = lines[i];
-                        if (i + 1 < lines.length && !timeRegex.test(lines[i + 1]) && !lines[i + 1].includes("รับชม")) {
-                            sectorLine = lines[i + 1];
+                    const lines = text.split('\\n').map(l => l.trim()).filter(Boolean);
+                    for (const line of lines) {
+                        const match = line.match(symbolLineRegex);
+                        if (match) {
+                            const sym = match[1].trim();
+                            found.push(sym);
+                            break;
                         }
                     }
                 }
+                return found;
+            };
 
-                if (titleLine && !seenSymbols.has(titleLine + "_" + timeStr)) {
-                    seenSymbols.add(titleLine + "_" + timeStr);
-                    const linkEl = card.querySelector('a[href]');
-                    const linkUrl = linkEl ? linkEl.href : "";
-                    items.push({
-                        title: titleLine,
-                        sector: sectorLine,
-                        time: timeStr,
-                        link: linkUrl
-                    });
+            let allSymbols = collectSymbols();
+
+            // หากมี Scrollbar ให้ค่อยๆ เลื่อนลงไปเก็บจนสุดตาราง
+            if (scrollables.length > 0) {
+                const scroller = scrollables[0];
+                const maxScroll = scroller.scrollHeight;
+                for (let pos = 300; pos <= maxScroll + 300; pos += 350) {
+                    scroller.scrollTop = pos;
+                    const more = collectSymbols();
+                    for (const s of more) {
+                        if (!allSymbols.includes(s)) {
+                            allSymbols.push(s);
+                        }
+                    }
                 }
+                scroller.scrollTop = 0; // เลื่อนกลับขึ้นบนสุด
             }
 
-            return { header: headerText, items: items };
+            // ลบตัวซ้ำโดยรักษาลำดับเดิม
+            const uniqueSymbols = [...new Set(allSymbols)];
+            return { header: headerText, symbols: uniqueSymbols };
         }""")
     except Exception as e:
         print(f"Error extracting right panel: {e}")
-        return {"header": "", "items": []}
+        return {"header": "", "symbols": []}
 
-def extract_weekly_highlights(page):
-    """ดึงข้อมูลจากส่วน Weekly Highlights ด้านบนเป็นข้อมูลเสริม"""
-    try:
-        return page.evaluate("""() => {
-            const results = [];
-            const timeRegex = /(\\d{2}:\\d{2}\\s*[-–]\\s*\\d{2}:\\d{2})/;
-            const dateRegex = /(\\d{1,2}\\s*(?:ม\\.ค\\.|ก\\.พ\\.|มี\\.ค\\.|เม\\.ย\\.|พ\\.ค\\.|มิ\\.ย\\.|ก\\.ค\\.|ส\\.ค\\.|ก\\.ย\\.|ต\\.ค\\.|พ\\.ย\\.|ธ\\.ค\\.)\\s*\\d{4})/;
-            const companyRegex = /^([A-Z0-9&*+-]+)\\s*:\\s*(.+)$/;
-
-            const boxes = Array.from(document.querySelectorAll('div, li'));
-            const seen = new Set();
-
-            for (const box of boxes) {
-                const txt = (box.innerText || "").trim();
-                if (!timeRegex.test(txt) || !dateRegex.test(txt)) continue;
-
-                const tMatches = txt.match(new RegExp(timeRegex, 'g')) || [];
-                if (tMatches.length !== 1) continue;
-
-                const dMatch = txt.match(dateRegex);
-                const lines = txt.split('\\n').map(l => l.trim()).filter(Boolean);
-                const compLine = lines.find(l => companyRegex.test(l));
-
-                if (compLine && dMatch) {
-                    const key = compLine + "_" + dMatch[1] + "_" + tMatches[0];
-                    if (!seen.has(key)) {
-                        seen.add(key);
-                        const compIdx = lines.indexOf(compLine);
-                        const sector = (compIdx >= 0 && compIdx + 1 < lines.length && !dateRegex.test(lines[compIdx + 1])) ? lines[compIdx + 1] : "";
-                        const linkEl = box.querySelector('a[href]');
-                        results.push({
-                            date_str: dMatch[1],
-                            title: compLine,
-                            sector: sector,
-                            time: tMatches[0],
-                            link: linkEl ? linkEl.href : ""
-                        });
-                    }
-                }
-            }
-            return results;
-        }""")
-    except Exception as e:
-        print(f"Error extracting weekly highlights: {e}")
-        return []
-
-def click_calendar_day(page, day_num):
-    """คลิกที่ตัวเลขวันที่ในปฏิทินกิจกรรมฝั่งซ้ายมือ"""
+def click_calendar_day_and_wait(page, day_num):
+    """คลิกตัวเลขวันที่ในปฏิทินฝั่งซ้าย และรอจนกว่าหัวข้อ 'รายการกิจกรรม <วันที่>' ฝั่งขวาจะเปลี่ยนตามจริง"""
     day_str = str(day_num)
     try:
-        clicked = page.evaluate("""(dayStr) => {
+        page.evaluate("""(dayStr) => {
             const calHeaders = Array.from(document.querySelectorAll('div, span, h2, h3, p')).filter(
                 el => (el.innerText || '').trim() === 'ปฏิทินกิจกรรม'
             );
@@ -176,11 +153,21 @@ def click_calendar_day(page, day_num):
             }
             return false;
         }""", day_str)
-        page.wait_for_timeout(2500)
-        return clicked
+
+        # รอให้หัวข้อฝั่งขวาเปลี่ยนเป็น 'รายการกิจกรรม <day_str> ...' จริงๆ (ป้องกันการดึงข้อมูลวันเก่าซ้ำ)
+        expected_prefix = f"รายการกิจกรรม {day_str} "
+        for _ in range(10):
+            page.wait_for_timeout(500)
+            current_header = page.evaluate("""() => {
+                const els = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, div, span, p'));
+                const h = els.find(el => (el.innerText || '').trim().startsWith('รายการกิจกรรม') && el.children.length === 0);
+                return h ? h.innerText.trim() : '';
+            }""")
+            if current_header.startswith(expected_prefix):
+                break
+        page.wait_for_timeout(1000)
     except Exception as e:
         print(f"Error clicking calendar day {day_num}: {e}")
-        return False
 
 def scrape_from_homepage():
     tz_bkk = datetime.timezone(datetime.timedelta(hours=7))
@@ -199,12 +186,14 @@ def scrape_from_homepage():
         page.goto(HOME_URL, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(5000)
 
+        # เลื่อนหน้าจอลงมาที่ส่วน 'ปฏิทินกิจกรรม'
         page.evaluate("window.scrollBy(0, 700)")
         page.wait_for_timeout(2500)
 
-        day0_data = extract_right_panel_events(page)
+        # อ่านหัวข้อวันเริ่มต้นที่หน้าเว็บเลือกให้อัตโนมัติ
+        day0_data = extract_right_panel_symbols(page)
         header0 = day0_data.get("header", "")
-        print(f"Detected initial header: {header0}")
+        print(f"Initial header: {header0}")
 
         m = re.search(r"(\d{1,2})\s+([ก-๙]+)\s+(\d{4})", header0)
         if m:
@@ -221,63 +210,52 @@ def scrape_from_homepage():
             target_d = base_date + datetime.timedelta(days=offset)
             date_display = f"{target_d.day} {THAI_MONTHS_FULL[target_d.month]} {target_d.year}"
 
-            if offset == 0 and day0_data.get("items"):
-                current_data = day0_data
-            else:
-                if target_d.month != base_date.month and offset > 0 and (base_date + datetime.timedelta(days=offset - 1)).month == base_date.month:
+            if offset > 0:
+                # กรณีข้ามเดือน ให้กดลูกศร '>' เปลี่ยนเดือนบนปฏิทินก่อน
+                prev_d = base_date + datetime.timedelta(days=offset - 1)
+                if target_d.month != prev_d.month:
                     page.evaluate("""() => {
                         const nextBtns = Array.from(document.querySelectorAll('button, svg, span')).filter(el => (el.innerText || '').trim() === '>');
                         if (nextBtns.length > 0) nextBtns[0].click();
                     }""")
                     page.wait_for_timeout(1500)
 
-                click_calendar_day(page, target_d.day)
-                current_data = extract_right_panel_events(page)
+                click_calendar_day_and_wait(page, target_d.day)
 
-            try:
-                scrolled = page.evaluate("""() => {
-                    const scrollables = Array.from(document.querySelectorAll('div')).filter(
+            # ดึงรายชื่อหุ้นหลังจากเลื่อน Scrollbar ในแต่ละสเต็ป
+            symbols_list = []
+            for scroll_step in range(5):
+                data = extract_right_panel_symbols(page)
+                for s in data.get("symbols", []):
+                    if s not in symbols_list:
+                        symbols_list.append(s)
+
+                # เลื่อน Scrollbar ของกล่องรายการฝั่งขวาลงเพื่อโหลดตัวถัดไป
+                has_more = page.evaluate("""(step) => {
+                    const els = Array.from(document.querySelectorAll('div')).filter(
                         el => el.scrollHeight > el.clientHeight + 20 && (el.innerText || '').includes('รายละเอียด')
                     );
-                    if (scrollables.length > 0) {
-                        scrollables[0].scrollTop = scrollables[0].scrollHeight;
+                    if (els.length > 0) {
+                        const scroller = els[0];
+                        if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 5) {
+                            return false;
+                        }
+                        scroller.scrollTop += 400;
                         return true;
                     }
                     return false;
-                }""")
-                if scrolled:
-                    page.wait_for_timeout(1200)
-                    more_data = extract_right_panel_events(page)
-                    existing_keys = {f"{x['title']}_{x['time']}" for x in current_data["items"]}
-                    for item in more_data["items"]:
-                        if f"{item['title']}_{item['time']}" not in existing_keys:
-                            current_data["items"].append(item)
-            except Exception as e:
-                print(f"Scroll notice: {e}")
+                }""", scroll_step)
+                if not has_more:
+                    break
+                page.wait_for_timeout(800)
 
             schedule_days.append({
                 "label": labels[offset],
                 "date_display": date_display,
-                "date_short": f"{target_d.day} {THAI_MONTHS_SHORT[target_d.month]} {target_d.year}",
-                "items": current_data.get("items", [])
+                "symbols": symbols_list
             })
 
-        highlights = extract_weekly_highlights(page)
         browser.close()
-
-    for day_info in schedule_days:
-        existing_titles = {x["title"].split(":")[0].strip() for x in day_info["items"]}
-        for hl in highlights:
-            if hl["date_str"] == day_info["date_short"]:
-                sym = hl["title"].split(":")[0].strip()
-                if sym not in existing_titles:
-                    existing_titles.add(sym)
-                    day_info["items"].append({
-                        "title": hl["title"],
-                        "sector": hl["sector"],
-                        "time": hl["time"],
-                        "link": hl["link"]
-                    })
 
     return schedule_days
 
@@ -285,11 +263,6 @@ def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         raise ValueError("กรุณาตั้งค่า TELEGRAM_BOT_TOKEN และ TELEGRAM_CHAT_ID ใน GitHub Secrets")
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    
-    # ป้องกันกรณีข้อความยาวเกิน 4000 ตัวอักษรของ Telegram
-    if len(message) > 4000:
-        message = message[:3950] + "\n...\n(ดูเพิ่มเติมในเว็บ SET)"
-
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
@@ -298,8 +271,6 @@ def send_telegram(message):
     }
     res = requests.post(url, json=payload, timeout=20)
     if not res.ok:
-        print(f"Telegram API Notice (retrying as plain text): {res.text}")
-        # ระบบสำรอง: หากติดปัญหา HTML ใดๆ ให้ถอดแท็ก HTML ออกแล้วส่งเป็นข้อความธรรมดาทันที
         clean_text = re.sub(r"<[^>]+>", "", html.unescape(message))
         payload["text"] = clean_text
         payload.pop("parse_mode", None)
@@ -308,24 +279,21 @@ def send_telegram(message):
 
 def main():
     schedule_days = scrape_from_homepage()
-    lines = ["📢 <b>แจ้งเตือนตารางหุ้น SET Opportunity Day</b>\n"]
+    lines = ["📊 <b>รายชื่อหุ้นนำเสนอผลการดำเนินงาน (OppDay)</b>\n"]
 
     for day_info in schedule_days:
         lines.append(f"{day_info['label']} <b>({html.escape(day_info['date_display'])})</b>")
-        items = day_info["items"]
-        if items:
-            items.sort(key=lambda x: x["time"])
-            for it in items:
-                safe_title = html.escape(it["title"])
-                safe_time = html.escape(it["time"])
-                safe_sector = f" <i>({html.escape(it['sector'])})</i>" if it["sector"] else ""
-                link = html.escape(it["link"] if it["link"].startswith("http") else HOME_URL, quote=True)
-                lines.append(f"• ⏰ <b>{safe_time}</b> | <b>{safe_title}</b>{safe_sector} 👉 <a href='{link}'>รับชมออนไลน์</a>")
+        symbols = day_info["symbols"]
+        if symbols:
+            # แสดงเฉพาะชื่อย่อหุ้นล้วนๆ อ่านง่าย สบายตา
+            safe_syms = [f"<b>{html.escape(s)}</b>" for s in symbols]
+            lines.append(f"👉 {', '.join(safe_syms)}")
+            lines.append(f"<i>(รวม {len(symbols)} บริษัท)</i>")
         else:
             lines.append("• <i>ไม่มีกำหนดการนำเสนอในวันนี้</i>")
         lines.append("")
 
-    lines.append(f"🔗 <a href='{HOME_URL}'>เปิดหน้าแรก SET OPPDAY</a> | <a href='{CALENDAR_URL}'>ดูตารางปฏิทินเต็ม</a>")
+    lines.append(f"🔗 <a href='{HOME_URL}'>คลิกดูตารางและรับชมออนไลน์บนเว็บ SET</a>")
     send_telegram("\n".join(lines))
 
 if __name__ == "__main__":
